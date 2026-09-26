@@ -1,6 +1,6 @@
 /* =====================================================================
- *  Hide & Seek  —  a multiplayer gamemode for PolyTrack 0.6.2
- *  Built for PolyModLoader 0.6.2.
+ *  Hide & Seek  —  a multiplayer gamemode for PolyTrack 0.6.3
+ *  Built for PolyModLoader 0.6.3.
  *
  *  One player (or several, on big lobbies) is the seeker. The seeker
  *  stares at a black screen while the hiders scatter; when the timer
@@ -25,14 +25,14 @@ import {
   PolyMod,
   MixinType,
   SettingType,
-} from "https://cdn.polymodloader.com/pml/PolyModLoader/0.6.2/PolyTypes.js";
+} from "https://cdn.polymodloader.com/pml/PolyModLoader/0.6.3/PolyTypes.js";
 
 /* ------------------------------------------------------------------ *
  *  Constants
  * ------------------------------------------------------------------ */
 
 const MOD_ID = "hideandseek";
-const MOD_VERSION = "1.0.0";
+const MOD_VERSION = "2.0.0";
 
 /* Wire format: "HNS" + protocol version, then UTF-8 JSON. */
 const MAGIC = [0x48, 0x4e, 0x53, 0x01];
@@ -395,6 +395,42 @@ const HNS = {
   lastRadarPing: 0,
   localOpacity: 1,
 
+  /* ---------------- gamemode picked on the host screen ------------- */
+
+  /* Which gamemode the host chose in the Game Mode row, or null for
+   * plain racing. Written by the injected UI code. */
+  hostMode: null,
+  pendingAutoStart: false,
+  lastAutoStartTry: 0,
+
+  /* The buttons the mod adds next to Casual and Competitive.
+   *
+   * These deliberately do NOT become new values of the game's own game
+   * mode enum. A value the enum does not know makes every client bail
+   * out of the NewSession message with "Unknown gameMode value" and
+   * hang up, and two other places throw "Unknown multiplayer game
+   * mode" outright. So the session still runs as Casual on the wire
+   * and the real mode travels over the mod's own channel. */
+  gamemodes() {
+    return [
+      {
+        id: "hns",
+        title: "Hide & Seek",
+        info: "One seeker is blindfolded while the hiders scatter. A caught hider is out; the last one standing wins.",
+      },
+      {
+        id: "infection",
+        title: "Infection",
+        info: "A caught hider joins the seekers. The seekers win by catching everyone before the clock runs out.",
+      },
+      {
+        id: "tag",
+        title: "Tag",
+        info: "Whoever gets caught becomes IT. Least time spent as IT when the clock runs out wins.",
+      },
+    ];
+  },
+
   /* ---------------- settings ---------------- */
 
   /* pml.getSetting() reaches into the bundle through eval(), so the
@@ -442,10 +478,14 @@ const HNS = {
       remote: null,
     };
     if (this.sess.isHost) this.resetHostBookkeeping();
+    /* Hosting with one of the mod's gamemodes selected starts a round
+     * by itself, as soon as enough players have actually joined. */
+    this.pendingAutoStart = this.sess.isHost && !!this.hostMode;
     console.log(
       "[hideandseek] session " +
         sessionId +
-        (this.sess.isHost ? " (host)" : " (client)"),
+        (this.sess.isHost ? " (host)" : " (client)") +
+        (this.hostMode ? " mode=" + this.hostMode : ""),
     );
   },
 
@@ -572,6 +612,9 @@ const HNS = {
       this.hud.banner("Host only", "Only the lobby host starts a round", 2.5);
       return;
     }
+    /* Whichever way the host drives it by hand, stop the pending
+     * auto-start from firing a second round underneath them. */
+    this.pendingAutoStart = false;
     if (this.state) this.abortRound();
     else this.startRound();
   },
@@ -589,7 +632,9 @@ const HNS = {
       return;
     }
 
-    const mode = this.setting("HnsMode", "hns");
+    /* A gamemode chosen on the Host Multiplayer screen wins over the
+     * one in the settings menu, which is the default for the keybind. */
+    const mode = this.hostMode || this.setting("HnsMode", "hns");
     const hideTime = this.number("HnsHideTime", 30);
     const roundTime = this.number("HnsRoundTime", 300);
 
@@ -930,9 +975,23 @@ const HNS = {
     s.remote = remoteCars;
     this.players(); /* also refreshes myId */
 
+    if (s.isHost && this.pendingAutoStart && !this.state) this.tryAutoStart();
     if (s.isHost && this.state) this.hostTick(this.collectPositions());
 
     this.applyLocalEffects();
+  },
+
+  /* Hosting with a mod gamemode selected waits for the lobby to fill
+   * before kicking off, rather than failing on an empty session. Once
+   * the first round is away, the "start another round automatically"
+   * setting takes over. */
+  tryAutoStart() {
+    const t = now();
+    if (t - this.lastAutoStartTry < 0.5) return;
+    this.lastAutoStartTry = t;
+    if (this.moddedIds().length < MIN_PLAYERS) return;
+    this.pendingAutoStart = false;
+    this.startRound();
   },
 
   /* id -> {x, y, z, frames} for everyone we can see. Remote cars are
@@ -1311,8 +1370,8 @@ class HideAndSeekMod extends PolyMod {
       token: `setNameTag(e, t) {`,
       func: `
         if (null == t) {
-          if (null != (0, l.gn)(this, Ae, "f")) {
-            ((0, l.GG)(this, Ae, null, "f"),
+          if (null != (0, l.gn)(this, ve, "f")) {
+            ((0, l.GG)(this, ve, null, "f"),
               (0, l.gn)(this, D, "m", Fe).call(this));
           }
           return;
@@ -1339,7 +1398,7 @@ class HideAndSeekMod extends PolyMod {
      *        "leftover data" check drops the connection. */
     pml.registerGlobalMixin({
       type: MixinType.INSERT,
-      token: `case Yt.ModCustomMessage:`,
+      token: `case en.ModCustomMessage:`,
       func: `
         try {
           window.PolyHNS && window.PolyHNS.onHostMessage(this, t, r.subarray(a));
@@ -1351,7 +1410,7 @@ class HideAndSeekMod extends PolyMod {
     });
     pml.registerGlobalMixin({
       type: MixinType.INSERT,
-      token: `case $t.ModCustomMessage:`,
+      token: `case nn.ModCustomMessage:`,
       func: `
         try {
           window.PolyHNS && window.PolyHNS.onClientMessage(this, i.subarray(r));
@@ -1372,8 +1431,8 @@ class HideAndSeekMod extends PolyMod {
       tokenEnd: `kickPlayer(e) {`,
       func: `hnsSend(e) {
               const t = new Uint8Array(1 + e.length);
-              ((t[0] = $t.ModCustomMessage), t.set(e, 1));
-              for (const n of (0, R.gn)(this, Tn, "f")) {
+              ((t[0] = nn.ModCustomMessage), t.set(e, 1));
+              for (const n of (0, R.gn)(this, _n, "f")) {
                 if (!n.hnsMod) continue;
                 try {
                   n.dataChannel.send(t);
@@ -1384,7 +1443,7 @@ class HideAndSeekMod extends PolyMod {
             }
             hnsModdedIds() {
               const e = [];
-              for (const t of (0, R.gn)(this, Tn, "f")) if (t.hnsMod) e.push(t.id);
+              for (const t of (0, R.gn)(this, _n, "f")) if (t.hnsMod) e.push(t.id);
               return e;
             }
             kickPlayer(e) {`,
@@ -1395,15 +1454,15 @@ class HideAndSeekMod extends PolyMod {
      *    mod writes is not overwritten again until the next frame. */
     pml.registerGlobalMixin({
       type: MixinType.INSERT,
-      token: `((0, R.gn)(this, jr, "m", vs).call(this),`,
+      token: `((0, R.gn)(this, ta, "m", Cs).call(this),`,
       func: `
                 window.PolyHNS &&
                   window.PolyHNS.tick(
                     this,
                     n,
-                    (0, R.gn)(this, Fa, "f"),
-                    (0, R.gn)(this, Ja, "f"),
-                    (0, R.gn)(this, Wa, "f"),
+                    (0, R.gn)(this, Xa, "f"),
+                    (0, R.gn)(this, as, "f"),
+                    (0, R.gn)(this, Za, "f"),
                   ),`,
     });
 
@@ -1450,9 +1509,50 @@ class HideAndSeekMod extends PolyMod {
               } catch (hnsErr) {}
       `,
     });
+
+    /* 10. Put the gamemodes where people actually look for them: the
+     *     Game Mode row on the Host Multiplayer screen, next to Casual
+     *     and Competitive.
+     *
+     *     Inserted just after the vanilla row is finished, where the
+     *     container (a), the button list (o), the selected mode (r)
+     *     and the description line (c) are all still in scope. The
+     *     enclosing builder is a plain function called with .call(this),
+     *     so an arrow function here still sees the right \`this\`.
+     *
+     *     Picking one of these leaves r on Casual - see gamemodes()
+     *     for why the wire protocol must not learn a new value - and
+     *     records the real mode for the session that is about to start. */
+    pml.registerGlobalMixin({
+      type: MixinType.INSERT,
+      token: `((c.className = "info"), a.appendChild(c), l());`,
+      func: `
+              if (window.PolyHNS) {
+                window.PolyHNS.hostMode = null;
+                for (const e of o)
+                  e.addEventListener("click", () => {
+                    window.PolyHNS.hostMode = null;
+                  });
+                for (const hnsMode of window.PolyHNS.gamemodes()) {
+                  const hnsButton = document.createElement("button");
+                  ((hnsButton.className = "button"),
+                    (hnsButton.textContent = hnsMode.title),
+                    hnsButton.addEventListener("click", () => {
+                      ((0, R.gn)(this, yc, "f").playUIClick(),
+                        (r = an.Casual),
+                        (window.PolyHNS.hostMode = hnsMode.id));
+                      for (const e of o) e.classList.remove("selected");
+                      (hnsButton.classList.add("selected"),
+                        (c.textContent = hnsMode.info));
+                    }),
+                    a.appendChild(hnsButton),
+                    o.push(hnsButton));
+                }
+              }`,
+    });
   };
 
-  init = async (pml) => {
+  init = (pml) => {
     HNS.pml = pml;
 
     pml.registerSettingCategory("Hide & Seek");

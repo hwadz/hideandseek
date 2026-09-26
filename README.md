@@ -6,13 +6,9 @@ and has to drive into the hiders.
 
 It doubles as a tag gamemode — the same round machinery runs three rule sets.
 
-| Mod version | PolyTrack / PolyModLoader |
-| --- | --- |
-| **1.1.0** (current) | 0.6.3 |
-| 1.0.0 | 0.6.2 |
-
-PolyModLoader picks the right one from `manifest.json` automatically — there is
-a single import URL either way.
+Requires **PolyTrack / PolyModLoader 0.6.3**. (0.6.2 was supported up to mod
+version 1.1.0; that build is still in the git history but is no longer offered,
+because the minified names the mixins anchor to differ between the two.)
 
 ---
 
@@ -59,9 +55,14 @@ stays a spectator — they are never kicked and the lobby still works.
 
 ## Playing
 
-1. Host a multiplayer game and wait for everyone to join.
-2. The host presses **N** to start a round, **N** again to cancel one.
-3. Round rules come from the **host's** Settings → Hide & Seek. Everyone
+1. **Multiplayer → Host**, and pick **Hide & Seek**, **Infection** or **Tag**
+   in the *Game Mode* row, next to Casual and Competitive.
+2. Choose a track and host. The round starts by itself once at least two
+   players with the mod have joined, and a new one starts after each result
+   while *Start another round automatically* is on.
+3. The host can also press **N** at any time to start or stop a round by hand
+   — including during a plain Casual or Competitive session.
+4. Round rules come from the **host's** Settings → Hide & Seek. Everyone
    else's copies of those settings are ignored; only their local preferences
    (HUD, sounds, warnings) apply.
 
@@ -141,9 +142,23 @@ Proximity warnings and the seeker radar are computed on each client from the
 car positions it already has locally, so they cost nothing on the wire and stay
 smooth between broadcasts.
 
+### Why the gamemodes are not real game mode values
+
+The obvious implementation is to add `HideAndSeek` to the game's own multiplayer
+game mode enum. That breaks the lobby. The enum value travels in the NewSession
+message, and a client that does not recognise it logs `Unknown gameMode value`
+and **closes the connection**; two further places do
+`default: throw new Error("Unknown multiplayer game mode")`.
+
+So a session hosted in one of these modes is still a **Casual** session as far
+as the game and the wire protocol are concerned. The buttons only record the
+choice locally on the host, and the real mode reaches the other players over
+the mod's own message channel along with the rest of the round state. That also
+keeps a vanilla player's join working — they simply spectate.
+
 ### Mixins
 
-Nine global mixins, all registered in `preInit` — see `1.1.0/main.mod.js`, each
+Ten global mixins, all registered in `preInit` — see `2.0.0/main.mod.js`, each
 one commented in place.
 
 | # | Anchor | Why |
@@ -157,6 +172,7 @@ one commented in place.
 | 7 | `for (const t of o.mods)` | Host-side: note whether a joining peer runs the mod. |
 | 8 | `isOfferSet: !1,` | Store that flag on the peer record. |
 | 9 | game session `dispose` | Tear the round down when the track is left. |
+| 10 | the `info` line of the Game Mode row | Add the gamemode buttons to the Host Multiplayer screen. |
 
 Global mixins are string surgery on PolyModLoader's own prettier-formatted copy
 of `main.bundle.js`, not on the minified bundle that ships in the game's asar —
@@ -198,9 +214,14 @@ offline harnesses live in the scratch directory used to build it:
   catches, cooldowns, respawn immunity, height separation, all three modes,
   disconnects, HUD render and teardown.
 
-Both pass for 1.0.0/0.6.2 and 1.1.0/0.6.3. What they cannot cover is anything
-that needs a real lobby: live WebRTC, the signalling server, and how the round
-feels at real ping. Play-test before relying on it.
+- a third executes the Game Mode row snippet against a toy DOM with the same
+  locals the real call site has, so the button wiring is run rather than just
+  parsed: labels, highlight handoff, description text, and that picking a mod
+  gamemode leaves the wire value on Casual.
+
+All three pass (10 mixins, 59 logic checks, 18 UI checks). What they cannot
+cover is anything that needs a real lobby: live WebRTC, the signalling server,
+and how the round feels at real ping. Play-test before relying on it.
 
 ## Known limitations
 
