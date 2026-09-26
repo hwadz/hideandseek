@@ -25,10 +25,29 @@ Open PolyModLoader 0.6.3 (the launcher, or <https://w.polymodloader.com>), go to
 https://cdn.polymodloader.com/gh/hwadz/hideandseek/main
 ```
 
-That is PML's CDN form `…/[gh|cb|gl|bb]/<owner>/<repo>/<branch>[/path]` — `gh`
+That is PML's CDN form `…/[gh|cb|gl|bb]/<owner>/<repo>/<ref>[/path]` — `gh`
 = GitHub, `cb` = Codeberg, `gl` = GitLab, `bb` = Bitbucket — pointed at
 whichever folder holds `manifest.json`, which here is the repo root. If you
-fork or move the repo, change the owner/repo/branch to match.
+fork or move the repo, change the owner/repo/ref to match.
+
+### If a fresh push does not show up
+
+The CDN caches `manifest.json` for a branch ref with `max-age=14400` (4 hours),
+and it ignores both `?cache-busting` query strings and `Cache-Control:
+no-cache`. So for a while after a release the branch URL can still hand out the
+previous version list, even though the new version's files are already being
+served.
+
+`<ref>` accepts a **commit SHA**, which is a distinct cache key and therefore
+always fresh:
+
+```
+https://cdn.polymodloader.com/gh/hwadz/hideandseek/5ef960d
+```
+
+That pins the install to that commit and will not auto-update, so it is the
+thing to use right after a push (or for a reproducible install), not the URL to
+hand out generally.
 
 To iterate locally, serve this folder over HTTP, open <https://w.polymodloader.com>,
 add `http://localhost:<port>` as a mod, and turn **cache mods** off in the PML
