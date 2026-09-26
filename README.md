@@ -169,7 +169,7 @@ keeps a vanilla player's join working — they simply spectate.
 
 ### Mixins
 
-Ten global mixins, all registered in `preInit` — see `2.0.0/main.mod.js`, each
+Ten global mixins, all registered in `preInit` — see `2.1.0/main.mod.js`, each
 one commented in place.
 
 | # | Anchor | Why |

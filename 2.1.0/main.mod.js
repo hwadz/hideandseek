@@ -32,7 +32,7 @@ import {
  * ------------------------------------------------------------------ */
 
 const MOD_ID = "hideandseek";
-const MOD_VERSION = "2.0.0";
+const MOD_VERSION = "2.1.0";
 
 /* Wire format: "HNS" + protocol version, then UTF-8 JSON. */
 const MAGIC = [0x48, 0x4e, 0x53, 0x01];
