@@ -1,0 +1,3 @@
+# Keep the files PolyModLoader fetches byte-identical on every platform.
+* text=auto eol=lf
+*.png binary

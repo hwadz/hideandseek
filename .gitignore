@@ -1,0 +1,9 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local dev servers / editors
+node_modules/
+.vscode/
+.idea/
