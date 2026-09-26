@@ -97,16 +97,22 @@ after a couple of rounds:
 - **Catch cooldown** (default 3 s) after every catch.
 - **Respawn immunity** (1.5 s) so the start line cannot be camped.
 - **No instant tag-backs** in tag mode (5 s).
-- **Seekers are picked at random**, preferring players who did not seek last
-  round, and the count scales with lobby size (1 per 5 players, up to 3).
+- **Seekers are picked at random, and nobody ever seeks twice in a row.** Last
+  round's seekers are excluded outright rather than merely deprioritised, and
+  the memory survives a track change, which opens a whole new session. If a
+  large seeker count cannot be filled without repeating somebody, the round
+  runs one seeker short instead. The count otherwise scales with lobby size
+  (1 per 5 players, up to 3).
 - **Proximity warning** — hiders get a red glow that grows as a seeker closes in.
 - **Seeker radar** — in the last third of the round the seeker gets a compass
   bearing and distance to the nearest hider, so rounds actually end.
 - **Catches respect height**, so nobody is caught through the floor of a bridge.
 - **Eliminated players free-roam as translucent ghosts** and can neither catch
   nor be caught. Remote cars carry no physics in PolyTrack, so they cannot
-  body-block either. They can also watch the seeker's camera with **V** —
-  deliberately *not* available to a hider who is still in the round.
+  body-block either. They can also watch any other player's camera with **V**.
+  A seeker never gets it, not even on the winner screen — being handed every
+  hider's camera would end the game on the spot — and neither does a hider who
+  is still in the round.
 - **A random community track between rounds**, so a lobby does not spend the
   evening on one map. The last few played are skipped.
 - **The personal-best popup is suppressed** so a hider crossing the finish line
@@ -169,7 +175,7 @@ keeps a vanilla player's join working — they simply spectate.
 
 ### Mixins
 
-Ten global mixins, all registered in `preInit` — see `2.1.0/main.mod.js`, each
+Ten global mixins, all registered in `preInit` — see `2.2.0/main.mod.js`, each
 one commented in place.
 
 | # | Anchor | Why |

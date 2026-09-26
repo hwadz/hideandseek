@@ -32,7 +32,7 @@ import {
  * ------------------------------------------------------------------ */
 
 const MOD_ID = "hideandseek";
-const MOD_VERSION = "2.1.0";
+const MOD_VERSION = "2.2.0";
 
 /* Wire format: "HNS" + protocol version, then UTF-8 JSON. */
 const MAGIC = [0x48, 0x4e, 0x53, 0x01];
@@ -52,6 +52,8 @@ const FEED_LENGTH = 6;
 const PART_SIZE = 5;
 const GRASS_GRACE = 0.35; /* s off track before it counts               */
 const GRASS_COOLDOWN = 4; /* s before it can fire again                 */
+const OUT_OF_BOUNDS_MARGIN = 3; /* grid cells of slack past the track    */
+const FALL_LIMIT = 60; /* world units below the start = fallen off       */
 const TRACK_HISTORY = 8; /* recently played tracks not to repeat        */
 
 /* The car is roughly 1.44 x 2.9 world units (the game's detectorBoxSize
@@ -208,6 +210,18 @@ const CSS = `
 .hns-banner.show { opacity: 1; }
 .hns-banner .sub { display: block; font-size: 20px; letter-spacing: 2px; opacity: 0.85; }
 
+/* The one thing on the HUD that is clickable. */
+.hns-reroll {
+  position: absolute; top: 12px; right: 12px;
+  pointer-events: auto; cursor: pointer;
+  font-family: ForcedSquare, Arial, sans-serif; font-size: 18px;
+  letter-spacing: 1px; color: #fff;
+  background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 4px; padding: 6px 14px;
+}
+.hns-reroll:hover { background: rgba(255,255,255,0.18); }
+.hns-reroll:active { background: rgba(255,255,255,0.3); }
+
 .hns-hint {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   font-size: 16px; opacity: 0.8; background: rgba(0,0,0,0.4);
@@ -272,6 +286,7 @@ class Hud {
       '<div class="hns-radar" style="display:none"></div>' +
       '<div class="hns-feed"></div>' +
       '<div class="hns-banner"></div>' +
+      '<button class="hns-reroll" type="button">&#8635; New seeker</button>' +
       '<div class="hns-hint"></div>';
     document.body.appendChild(root);
 
@@ -298,7 +313,11 @@ class Hud {
       banner: root.querySelector(".hns-banner"),
       hint: root.querySelector(".hns-hint"),
       count: blind.querySelector(".count"),
+      reroll: root.querySelector(".hns-reroll"),
     };
+    this.el.reroll.addEventListener("click", () => {
+      if (this.onReroll) this.onReroll();
+    });
   }
 
   /* Deliberately does not touch the blindfold: hiding the HUD must
@@ -306,6 +325,7 @@ class Hud {
   setVisible(visible) {
     this.build();
     this.root.classList.toggle("hns-off", !visible);
+    if (!visible) this.el.reroll.style.display = "none";
   }
 
   setBlind(visible, remaining) {
@@ -348,6 +368,8 @@ class Hud {
     } else {
       el.radar.style.display = "none";
     }
+
+    el.reroll.style.display = view.reroll ? "" : "none";
 
     el.players.style.display = view.rows ? "" : "none";
     if (view.rows) {
@@ -413,12 +435,20 @@ const HNS = {
   /* Session internals handed over by the per-frame mixin. */
   bridge: null,
 
-  /* Off-track reset. */
+  /* Off-track reset. `area`/`floorY` are derived from the track once
+   * per session; undefined means "not worked out yet". */
   grassFor: 0,
   grassCooldownUntil: 0,
+  area: undefined,
+  floorY: null,
 
   /* Player id whose camera we are borrowing, or null. */
   spectating: null,
+
+  /* Who seeked last round. Lives on the runtime, not the per-session
+   * bookkeeping, so a track change - which opens a whole new session -
+   * cannot hand the job straight back to the same player. */
+  previousSeekers: [],
 
   /* Track rotation between rounds (host only). */
   recentTracks: [],
@@ -509,6 +539,9 @@ const HNS = {
     this.pendingAutoStart =
       this.sess.isHost && (!!this.hostMode || this.rearmAfterTrack);
     this.rearmAfterTrack = false;
+    /* new session, possibly a new track */
+    this.area = undefined;
+    this.floorY = null;
     console.log(
       "[hideandseek] session " +
         sessionId +
@@ -517,8 +550,7 @@ const HNS = {
     );
   },
 
-  resetHostBookkeeping(keepPrevious) {
-    const previous = keepPrevious && this.host ? this.host.previousSeekers : [];
+  resetHostBookkeeping() {
     const seq = this.host ? this.host.seq : 0;
     this.host = {
       last: now(),
@@ -530,7 +562,6 @@ const HNS = {
       tagBack: {},
       frames: {},
       seekerTime: {},
-      previousSeekers: previous,
     };
   },
 
@@ -677,14 +708,21 @@ const HNS = {
       seekers = clamp(seekers, 1, eligible.length - 1);
     }
 
-    /* Prefer players who did not seek last round. */
-    const previous = this.host ? this.host.previousSeekers : [];
+    /* Last round's seekers are excluded outright, not merely
+     * deprioritised: nobody seeks twice in a row. Since the seeker
+     * count is always at most eligible - 1, there is always somebody
+     * left to draw, though a big seeker count can come up short - and
+     * one seeker fewer beats making the same player do it again. */
+    const previous = this.previousSeekers;
     const fresh = shuffle(eligible.filter((id) => previous.indexOf(id) === -1));
-    const repeat = shuffle(eligible.filter((id) => previous.indexOf(id) !== -1));
-    const chosen = fresh.concat(repeat).slice(0, seekers);
+    const chosen = fresh.slice(0, seekers);
+    if (!chosen.length) {
+      /* Only reachable if literally everyone seeked last round. */
+      chosen.push(shuffle(eligible.slice())[0]);
+    }
 
     this.resetHostBookkeeping();
-    this.host.previousSeekers = chosen.slice();
+    this.previousSeekers = chosen.slice();
     for (const id of eligible) this.host.seekerTime[id] = 0;
 
     const names = {};
@@ -697,6 +735,10 @@ const HNS = {
       hide: hideTime,
       round: roundTime,
       over: 0,
+      /* seconds of free movement for hiders once seeking starts;
+       * 0 means they never freeze */
+      settle: this.number("HnsFreezeDelay", 15),
+      settleWanted: this.number("HnsFreezeDelay", 15) > 0,
       play: eligible.slice(),
       seek: chosen,
       out: [],
@@ -722,6 +764,24 @@ const HNS = {
       this.say(missing + " player(s) without the mod are spectating");
     }
     this.broadcast();
+  },
+
+  /* Same track, same players, fresh draw of the seeker. The current
+   * seekers go into the "seeked last round" list, which startRound
+   * already prefers to draw around, so the hat cannot hand the job
+   * straight back to whoever has it. */
+  rerollSeeker() {
+    const s = this.sess;
+    if (!s || !s.isHost || !this.host) return;
+    if (!this.state) {
+      this.hud.banner("No round running", "", 2);
+      return;
+    }
+    const current = this.state.seek.slice();
+    this.clearRound();
+    this.previousSeekers = current;
+    this.pendingAutoStart = false;
+    this.startRound();
   },
 
   abortRound() {
@@ -779,6 +839,16 @@ const HNS = {
       }
     } else if (state.phase === "seeking") {
       state.round -= dt;
+      /* Hiders get a short while to commit to a spot, then they are
+       * pinned there for the rest of the round. */
+      if (state.settle > 0) {
+        state.settle -= dt;
+        if (state.settle <= 0) {
+          state.settle = 0;
+          this.say("Hiders are frozen");
+          this.broadcast();
+        }
+      }
       for (const id of state.seek) {
         host.seekerTime[id] = (host.seekerTime[id] || 0) + dt;
       }
@@ -1106,9 +1176,61 @@ const HNS = {
    * between two cells. Erring towards "on track" is deliberate - a
    * missed patch of grass is a nuisance, a reset in the middle of the
    * road is a ruined round. */
-  isOnGrass(car) {
+  /* The play area, in grid cells, plus a margin. getBounds() returns
+   * Vector2s where .x is the grid x and .y is the grid z. */
+  playArea() {
+    const bridge = this.bridge;
+    if (this.area !== undefined) return this.area;
+    this.area = null;
+    try {
+      const b = bridge.track.getBounds();
+      if (
+        b &&
+        b.min &&
+        b.max &&
+        Number.isFinite(b.min.x) &&
+        Number.isFinite(b.min.y) &&
+        Number.isFinite(b.max.x) &&
+        Number.isFinite(b.max.y) &&
+        b.max.x >= b.min.x
+      ) {
+        this.area = {
+          minX: b.min.x - OUT_OF_BOUNDS_MARGIN,
+          maxX: b.max.x + OUT_OF_BOUNDS_MARGIN,
+          minZ: b.min.y - OUT_OF_BOUNDS_MARGIN,
+          maxZ: b.max.y + OUT_OF_BOUNDS_MARGIN,
+        };
+      }
+      const start = bridge.track.getStartTransform();
+      this.floorY = start ? start.position.y - FALL_LIMIT : null;
+    } catch (err) {
+      this.area = null;
+      this.floorY = null;
+    }
+    return this.area;
+  },
+
+  isOffTrack(car) {
     const bridge = this.bridge;
     if (!bridge || !bridge.track || !bridge.track.getPartsAt) return false;
+
+    const pos = car.getPosition();
+
+    /* Out past the edge of the track, or fallen out of the world.
+     * Checked without needing wheel contact, so the mountains, a
+     * launch into the scenery and a fall off the map all count -
+     * none of those put a wheel on anything. */
+    const area = this.playArea();
+    if (area) {
+      const gx = pos.x / PART_SIZE;
+      const gz = pos.z / PART_SIZE;
+      if (gx < area.minX || gx > area.maxX || gz < area.minZ || gz > area.maxZ) {
+        return true;
+      }
+    }
+    if (this.floorY != null && pos.y < this.floorY) return true;
+
+    /* Otherwise: wheels touching something that is not a track part. */
     const contacts = car.getCarState().wheelContact;
     if (!contacts) return false;
 
@@ -1116,11 +1238,11 @@ const HNS = {
     for (const contact of contacts) {
       if (!contact || !contact.position) continue;
       touching += 1;
-      const gx = Math.round(contact.position.x / PART_SIZE);
-      const gy = Math.round(contact.position.y / PART_SIZE);
-      const gz = Math.round(contact.position.z / PART_SIZE);
+      const cx = Math.round(contact.position.x / PART_SIZE);
+      const cy = Math.round(contact.position.y / PART_SIZE);
+      const cz = Math.round(contact.position.z / PART_SIZE);
       for (let dy = 0; dy >= -1; dy--) {
-        const parts = bridge.track.getPartsAt(gx, gy + dy, gz);
+        const parts = bridge.track.getPartsAt(cx, cy + dy, cz);
         if (parts && parts.length) return false; /* on a track part */
       }
     }
@@ -1155,10 +1277,16 @@ const HNS = {
       this.grassFor = 0;
       return;
     }
+    /* A frozen hider cannot drive off anything, and dumping them on
+     * the start line unable to move would just be cruel. */
+    if (this.isFrozen()) {
+      this.grassFor = 0;
+      return;
+    }
 
     let onGrass = false;
     try {
-      onGrass = this.isOnGrass(s.localCar);
+      onGrass = this.isOffTrack(s.localCar);
     } catch (err) {
       return; /* never let a detection slip break the frame */
     }
@@ -1186,20 +1314,32 @@ const HNS = {
 
   /* ---------------- watching the seeker ---------------- */
 
-  /* Only for people who are out of the round or never in it - a live
-   * hider with the seeker's camera would not be much of a game. */
+  /* Only for people who are out of the round or never in it. A seeker
+   * still in play must never get this - being handed every hider's
+   * camera would end the game on the spot. */
   canSpectate() {
     const state = this.state;
     if (!state || !this.sess) return false;
+    /* A seeker never gets it, not even on the winner screen. */
+    if (this.isSeeker()) return false;
     if (state.phase === "over") return true;
     return !this.isPlaying() || this.isOut();
   },
 
-  seekerCars() {
+  /* Everyone still in the round who has a car of their own to watch,
+   * seekers first so the chase is one press away, then the hiders,
+   * then whoever is already out. */
+  spectateTargets() {
     const s = this.sess;
+    const state = this.state;
     const out = [];
-    if (!this.state || !s || !s.remote) return out;
-    for (const id of this.state.seek) {
+    if (!state || !s || !s.remote) return out;
+    const rank = (id) =>
+      state.seek.indexOf(id) !== -1 ? 0 : state.out.indexOf(id) !== -1 ? 2 : 1;
+    const ids = state.play
+      .filter((id) => id !== s.myId)
+      .sort((a, b) => rank(a) - rank(b) || a - b);
+    for (const id of ids) {
       const record = s.remote.get(id);
       if (record && record.car) out.push({ id, car: record.car });
     }
@@ -1215,9 +1355,9 @@ const HNS = {
       );
       return;
     }
-    const seekers = this.seekerCars();
+    const seekers = this.spectateTargets();
     if (!seekers.length) {
-      this.hud.banner("No seeker to watch", "", 2);
+      this.hud.banner("Nobody to watch", "", 2);
       return;
     }
     /* cycle: off -> first seeker -> ... -> last -> off */
@@ -1321,6 +1461,16 @@ const HNS = {
     return !!(s && list && list.indexOf(s.myId) !== -1);
   },
 
+  /* A hider whose settling time has run out: still in the round, not
+   * a seeker, not caught, and the timer has expired. */
+  isFrozen() {
+    const state = this.state;
+    if (!state || state.phase !== "seeking") return false;
+    if (!state.settleWanted) return false;
+    if (state.settle > 0) return false;
+    return this.isPlaying() && !this.isSeeker() && !this.isOut();
+  },
+
   isSeeker() {
     return !!this.state && this.inList(this.state.seek);
   },
@@ -1396,6 +1546,9 @@ const HNS = {
         s.localCar.isControlsDisabled = true;
         s.localCar.isPaused = true;
         s.localCar.audioVolume = 0;
+      } else if (this.isFrozen()) {
+        s.localCar.isControlsDisabled = true;
+        s.localCar.isPaused = true;
       }
       /* Cars that never started are stacked on the spawn and the game
        * hides all but one of them, so everyone is started explicitly
@@ -1457,6 +1610,7 @@ const HNS = {
       if (state.phase === "hiding") state.hide = Math.max(0, state.hide - dt);
       else if (state.phase === "seeking") {
         state.round = Math.max(0, state.round - dt);
+        if (state.settle > 0) state.settle = Math.max(0, state.settle - dt);
       } else if (state.phase === "over") {
         state.over = Math.max(0, state.over - dt);
       }
@@ -1495,6 +1649,10 @@ const HNS = {
       feed: state.feed ? state.feed.map((f) => f.m) : [],
       hint: "",
       radar: null,
+      /* only the host can reroll, and only mid-round */
+      reroll:
+        this.sess.isHost &&
+        (state.phase === "hiding" || state.phase === "seeking"),
     };
 
     if (state.phase === "hiding") {
@@ -1509,6 +1667,15 @@ const HNS = {
         state.mode
       ];
       view.urgent = state.round <= 30;
+      /* Hiders need to see the settling clock; it means nothing to a
+       * seeker, so they are not told about it. */
+      if (state.settleWanted && playing && !seeker && !out) {
+        view.phaseText =
+          state.settle > 0
+            ? "FIND A SPOT - " + formatClock(state.settle)
+            : "FROZEN";
+        view.urgent = view.urgent || state.settle > 0;
+      }
     } else {
       view.phaseText = state.win || "ROUND OVER";
     }
@@ -1531,7 +1698,7 @@ const HNS = {
     } else if (this.canSpectate()) {
       view.hint = "[V] watch the seeker";
     } else if (this.sess.isHost) {
-      view.hint = "[N] stop the round";
+      view.hint = "[N] stop the round    [B] new seeker";
     }
 
     this.localSenses(view, state, seeker, out, playing, t);
@@ -1980,6 +2147,19 @@ class HideAndSeekMod extends PolyMod {
       true,
     );
     pml.registerSetting(
+      "Freeze hiders after",
+      "HnsFreezeDelay",
+      SettingType.CUSTOM,
+      "15",
+      [
+        { title: "Never", value: "0" },
+        { title: "10 s", value: "10" },
+        { title: "15 s", value: "15" },
+        { title: "30 s", value: "30" },
+        { title: "60 s", value: "60" },
+      ],
+    );
+    pml.registerSetting(
       "Reset to the start on grass",
       "HnsGrassReset",
       SettingType.BOOL,
@@ -2013,7 +2193,19 @@ class HideAndSeekMod extends PolyMod {
       },
     );
     pml.registerKeybind(
-      "Watch the seeker",
+      "New seeker, same track (host)",
+      "HnsRerollSeeker",
+      "keydown",
+      "KeyB",
+      null,
+      (event) => {
+        if (event.repeat || !HNS.sess || !HNS.sess.isHost) return;
+        event.preventDefault();
+        HNS.rerollSeeker();
+      },
+    );
+    pml.registerKeybind(
+      "Spectate players",
       "HnsSpectateSeeker",
       "keydown",
       "KeyV",
@@ -2028,6 +2220,7 @@ class HideAndSeekMod extends PolyMod {
 
   postInit = () => {
     HNS.hud.build();
+    HNS.hud.onReroll = () => HNS.rerollSeeker();
     const loop = () => {
       try {
         HNS.render();
