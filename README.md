@@ -62,6 +62,8 @@ stays a spectator — they are never kicked and the lobby still works.
    while *Start another round automatically* is on.
 3. The host can also press **N** at any time to start or stop a round by hand
    — including during a plain Casual or Competitive session.
+4. Once you are caught, press **V** to ride along with the seeker's camera —
+   press it again to cycle seekers, and once more to go back to your own car.
 4. Round rules come from the **host's** Settings → Hide & Seek. Everyone
    else's copies of those settings are ignored; only their local preferences
    (HUD, sounds, warnings) apply.
@@ -88,6 +90,10 @@ after a couple of rounds:
   black screen.
 - **Everyone starts** when the round does, so nobody is left stacked on the
   spawn point (the game hides all but one car that has not started yet).
+- **Off-track resets.** Touching the grass for more than a third of a second
+  puts you back on the start line, so hiders have to use the track instead of
+  parking in the terrain. There is a cooldown so a bad landing cannot loop it,
+  and a brief clip of a corner does not count.
 - **Catch cooldown** (default 3 s) after every catch.
 - **Respawn immunity** (1.5 s) so the start line cannot be camped.
 - **No instant tag-backs** in tag mode (5 s).
@@ -99,7 +105,10 @@ after a couple of rounds:
 - **Catches respect height**, so nobody is caught through the floor of a bridge.
 - **Eliminated players free-roam as translucent ghosts** and can neither catch
   nor be caught. Remote cars carry no physics in PolyTrack, so they cannot
-  body-block either.
+  body-block either. They can also watch the seeker's camera with **V** —
+  deliberately *not* available to a hider who is still in the round.
+- **A random community track between rounds**, so a lobby does not spend the
+  evening on one map. The last few played are skipped.
 - **The personal-best popup is suppressed** so a hider crossing the finish line
   does not get their screen taken over.
 - **Disconnects are handled**: leavers drop out of the round, and if every
@@ -109,12 +118,14 @@ after a couple of rounds:
 
 Under **Settings → Hide & Seek**. Host-side (round rules): Gamemode, Hiding
 time, Round length, Seekers, Catch range, Catch cooldown, Warning range, Start
-another round automatically. Client-side (local preference): Hide name tags,
+another round automatically, Reset to the start on grass, Random community
+track each round. Client-side (local preference): Hide name tags,
 Hide skid marks, Warn hiders when a seeker is close, Seeker radar late in the
 round, Sound cues, Show the Hide & Seek HUD.
 
-Keybind under **Controls → Hide & Seek**: Start / stop round, default **N**.
-(`H` was not available — PolyTrack already uses it for Toggle UI.)
+Keybinds under **Controls → Hide & Seek**: Start / stop round (**N**) and
+Watch the seeker (**V**). `H` was not available — PolyTrack already uses it
+for Toggle UI.
 
 ---
 
@@ -168,7 +179,7 @@ one commented in place.
 | 3 | `case <c2h>.ModCustomMessage` | Host-side receive, and consume the payload. |
 | 4 | `case <h2c>.ModCustomMessage` | Client-side receive, and consume the payload. |
 | 5 | `kickPlayer` | Adds `hnsSend` / `hnsModdedIds` to the host connection class. |
-| 6 | the opacity-pass call in `update()` | The per-frame hook, placed after every car has moved. |
+| 6 | the opacity-pass call in `update()` | The per-frame hook, placed after every car has moved. Also hands over a small bridge to the session internals the mod needs: the track (`getPartsAt`), the track library, the renderer's `setCamera`, whether the free camera is flying, and the reset-to-start action. |
 | 7 | `for (const t of o.mods)` | Host-side: note whether a joining peer runs the mod. |
 | 8 | `isOfferSet: !1,` | Store that flag on the peer record. |
 | 9 | game session `dispose` | Tear the round down when the track is left. |
@@ -222,6 +233,19 @@ offline harnesses live in the scratch directory used to build it:
 All three pass (10 mixins, 59 logic checks, 18 UI checks). What they cannot
 cover is anything that needs a real lobby: live WebRTC, the signalling server,
 and how the round feels at real ping. Play-test before relying on it.
+
+### Telling road from grass
+
+Track parts sit on a grid of 5 world units and the track keeps a
+position → parts map, exposed as `getPartsAt(x, y, z)`. "On the grass" is
+therefore: the wheels are touching something, and none of the cells they touch
+holds a track part. The cell below each contact point is checked too, because
+a contact sits on a part's top face and that lands on a cell boundary. The
+check errs towards "on track" on purpose — a missed patch of grass is a
+nuisance, a reset in the middle of the road ruins a round.
+
+A consequence worth knowing: this confines hiders to the track. On a map where
+the terrain itself is meant to be driven, turn the setting off.
 
 ## Known limitations
 

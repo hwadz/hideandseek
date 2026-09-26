@@ -47,6 +47,13 @@ const RADAR_INTERVAL = 10; /* s between late-round seeker pings          */
 const RADAR_FROM = 1 / 3; /* radar wakes up with this fraction left      */
 const FEED_LENGTH = 6;
 
+/* Track parts sit on a grid of this many world units (the game's own
+ * C.partSize), which is what turns a car position into a grid cell. */
+const PART_SIZE = 5;
+const GRASS_GRACE = 0.35; /* s off track before it counts               */
+const GRASS_COOLDOWN = 4; /* s before it can fire again                 */
+const TRACK_HISTORY = 8; /* recently played tracks not to repeat        */
+
 /* The car is roughly 1.44 x 2.9 world units (the game's detectorBoxSize
  * is 0.89 x 0.22 x 1.8 and the wheels sit at +-0.72 / +-1.53), so two
  * cars that are actually touching are 1.5 - 2.9 apart centre to centre. */
@@ -403,6 +410,21 @@ const HNS = {
   pendingAutoStart: false,
   lastAutoStartTry: 0,
 
+  /* Session internals handed over by the per-frame mixin. */
+  bridge: null,
+
+  /* Off-track reset. */
+  grassFor: 0,
+  grassCooldownUntil: 0,
+
+  /* Player id whose camera we are borrowing, or null. */
+  spectating: null,
+
+  /* Track rotation between rounds (host only). */
+  recentTracks: [],
+  rotatingTrack: false,
+  rearmAfterTrack: false,
+
   /* The buttons the mod adds next to Casual and Competitive.
    *
    * These deliberately do NOT become new values of the game's own game
@@ -464,11 +486,14 @@ const HNS = {
 
   /* ---------------- session plumbing ---------------- */
 
-  enterSession(conn, sessionId) {
+  enterSession(conn, sessionId, gameMode) {
     this.leaveSession();
     this.sess = {
       conn,
       sessionId,
+      /* the game's own Casual/Competitive value, needed verbatim when
+       * starting a new session on another track */
+      gameMode,
       /* hnsSend only exists on the host connection class. */
       isHost: typeof conn.hnsSend === "function",
       myId: null,
@@ -479,8 +504,11 @@ const HNS = {
     };
     if (this.sess.isHost) this.resetHostBookkeeping();
     /* Hosting with one of the mod's gamemodes selected starts a round
-     * by itself, as soon as enough players have actually joined. */
-    this.pendingAutoStart = this.sess.isHost && !!this.hostMode;
+     * by itself, as soon as enough players have actually joined - and
+     * so does the fresh session that a track rotation creates. */
+    this.pendingAutoStart =
+      this.sess.isHost && (!!this.hostMode || this.rearmAfterTrack);
+    this.rearmAfterTrack = false;
     console.log(
       "[hideandseek] session " +
         sessionId +
@@ -766,7 +794,12 @@ const HNS = {
       if (state.over <= 0) {
         const again = this.bool("HnsAutoRestart", true);
         this.clearRound();
-        if (again) this.startRound();
+        if (!again) return;
+        /* A fresh track for the next round, if that is switched on.
+         * Changing the track starts a new session, which re-arms the
+         * auto-start, so the round begins once everyone has it. */
+        if (this.bool("HnsRotateTracks", true) && this.rotateTrack()) return;
+        this.startRound();
         return;
       }
     }
@@ -912,6 +945,81 @@ const HNS = {
     }
   },
 
+  /* ---------------- track rotation (host) ---------------- */
+
+  /* Moves the lobby onto a random community track for the next round.
+   * Returns true if a rotation was actually kicked off, in which case
+   * the caller must not also start a round: changing the track opens a
+   * new session, and entering it re-arms the auto-start. */
+  rotateTrack() {
+    const s = this.sess;
+    const bridge = this.bridge;
+    if (!s || !s.isHost || this.rotatingTrack) return false;
+    if (!bridge || !bridge.tracks || !bridge.tracks.forEachCommunityTrack) {
+      console.warn("[hideandseek] no track library; staying on this track");
+      return false;
+    }
+
+    const all = [];
+    try {
+      bridge.tracks.forEachCommunityTrack((id, group, meta, env, load) => {
+        if (typeof load === "function") all.push({ id, meta, load });
+      });
+    } catch (err) {
+      console.error("[hideandseek] could not list community tracks", err);
+      return false;
+    }
+    if (!all.length) return false;
+
+    /* Avoid the handful most recently played, but never run dry. */
+    let pool = all.filter((t) => this.recentTracks.indexOf(t.id) === -1);
+    if (!pool.length) pool = all;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+
+    this.rotatingTrack = true;
+    Promise.resolve()
+      .then(() => pick.load())
+      .then((loaded) => {
+        if (!loaded || !loaded.trackData) throw new Error("no track data");
+        /* A track with no start line would strand everybody. */
+        if (
+          typeof loaded.trackData.hasStartingPoint === "function" &&
+          !loaded.trackData.hasStartingPoint()
+        ) {
+          throw new Error("track has no starting point");
+        }
+        const live = this.sess;
+        if (!live || !live.isHost || live.conn !== s.conn) return;
+
+        this.recentTracks.push(pick.id);
+        while (this.recentTracks.length > TRACK_HISTORY) {
+          this.recentTracks.shift();
+        }
+        /* The new session arrives through the game's own NewSession
+         * path; entering it is what starts the next round. */
+        this.rearmAfterTrack = true;
+        live.conn.startNewSession(
+          live.gameMode,
+          loaded.trackMetadata,
+          loaded.trackData,
+        );
+        console.log(
+          "[hideandseek] next track: " +
+            ((pick.meta && pick.meta.name) || pick.id),
+        );
+      })
+      .catch((err) => {
+        console.error("[hideandseek] track rotation failed", err);
+        /* Stay put and just play another round here. */
+        this.rearmAfterTrack = false;
+        if (!this.state) this.startRound();
+      })
+      .finally(() => {
+        this.rotatingTrack = false;
+      });
+    return true;
+  },
+
   /* Somebody who quit mid-round must not keep a round alive forever,
    * and must not count towards "last hider standing" either. */
   reconcilePlayers() {
@@ -953,8 +1061,9 @@ const HNS = {
 
   /* Called from the game session's update(), handed the private fields
    * it keeps the local car, the remote cars and the session in. */
-  tick(gameSession, dt, localCar, remoteCars, multiplayer) {
+  tick(gameSession, dt, localCar, remoteCars, multiplayer, bridge) {
     this.lastTickSeen = now();
+    this.bridge = bridge || null;
 
     if (!multiplayer || !multiplayer.multiplayerConnection) {
       if (this.sess) this.leaveSession();
@@ -967,10 +1076,11 @@ const HNS = {
       this.sess.conn !== conn ||
       this.sess.sessionId !== multiplayer.sessionId
     ) {
-      this.enterSession(conn, multiplayer.sessionId);
+      this.enterSession(conn, multiplayer.sessionId, multiplayer.gameMode);
     }
 
     const s = this.sess;
+    s.gameMode = multiplayer.gameMode;
     s.localCar = localCar;
     s.remote = remoteCars;
     this.players(); /* also refreshes myId */
@@ -979,6 +1089,185 @@ const HNS = {
     if (s.isHost && this.state) this.hostTick(this.collectPositions());
 
     this.applyLocalEffects();
+    this.checkGrass(dt);
+    this.updateSpectateCamera(dt);
+  },
+
+  /* ---------------- off-track reset ---------------- */
+
+  /* A track part occupies whole grid cells of C.partSize (5) world
+   * units, and the track keeps a position -> parts map that
+   * getPartsAt() exposes. So "on the grass" is simply: wheels are
+   * touching something, and none of the cells they are touching holds
+   * a track part.
+   *
+   * The cell below each contact point is checked as well, because a
+   * contact sits on a part's top face and that lands on the boundary
+   * between two cells. Erring towards "on track" is deliberate - a
+   * missed patch of grass is a nuisance, a reset in the middle of the
+   * road is a ruined round. */
+  isOnGrass(car) {
+    const bridge = this.bridge;
+    if (!bridge || !bridge.track || !bridge.track.getPartsAt) return false;
+    const contacts = car.getCarState().wheelContact;
+    if (!contacts) return false;
+
+    let touching = 0;
+    for (const contact of contacts) {
+      if (!contact || !contact.position) continue;
+      touching += 1;
+      const gx = Math.round(contact.position.x / PART_SIZE);
+      const gy = Math.round(contact.position.y / PART_SIZE);
+      const gz = Math.round(contact.position.z / PART_SIZE);
+      for (let dy = 0; dy >= -1; dy--) {
+        const parts = bridge.track.getPartsAt(gx, gy + dy, gz);
+        if (parts && parts.length) return false; /* on a track part */
+      }
+    }
+    return touching > 0;
+  },
+
+  checkGrass(dt) {
+    const s = this.sess;
+    const state = this.state;
+    const running =
+      !!state && (state.phase === "hiding" || state.phase === "seeking");
+
+    if (
+      !running ||
+      !s ||
+      !s.localCar ||
+      !this.isPlaying() ||
+      this.isOut() ||
+      !this.bool("HnsGrassReset", true)
+    ) {
+      this.grassFor = 0;
+      return;
+    }
+    /* Not while blindfolded (the car is frozen on the start anyway),
+     * and not straight after a reset, or a bad spawn would loop. */
+    const t = now();
+    if (t < (this.grassCooldownUntil || 0)) {
+      this.grassFor = 0;
+      return;
+    }
+    if (state.phase === "hiding" && this.isSeeker()) {
+      this.grassFor = 0;
+      return;
+    }
+
+    let onGrass = false;
+    try {
+      onGrass = this.isOnGrass(s.localCar);
+    } catch (err) {
+      return; /* never let a detection slip break the frame */
+    }
+
+    if (!onGrass) {
+      this.grassFor = 0;
+      return;
+    }
+
+    /* Require a moment of it, so clipping a corner is not a reset. */
+    this.grassFor = (this.grassFor || 0) + clamp(dt, 0, 0.25);
+    if (this.grassFor < GRASS_GRACE) return;
+
+    this.grassFor = 0;
+    this.grassCooldownUntil = t + GRASS_COOLDOWN;
+    this.hud.banner("OFF TRACK", "back to the start", 2);
+    this.tuneBlip();
+    Blip.caught();
+    try {
+      this.bridge.resetToStart();
+    } catch (err) {
+      console.error("[hideandseek] reset failed", err);
+    }
+  },
+
+  /* ---------------- watching the seeker ---------------- */
+
+  /* Only for people who are out of the round or never in it - a live
+   * hider with the seeker's camera would not be much of a game. */
+  canSpectate() {
+    const state = this.state;
+    if (!state || !this.sess) return false;
+    if (state.phase === "over") return true;
+    return !this.isPlaying() || this.isOut();
+  },
+
+  seekerCars() {
+    const s = this.sess;
+    const out = [];
+    if (!this.state || !s || !s.remote) return out;
+    for (const id of this.state.seek) {
+      const record = s.remote.get(id);
+      if (record && record.car) out.push({ id, car: record.car });
+    }
+    return out;
+  },
+
+  toggleSpectate() {
+    if (!this.canSpectate()) {
+      this.hud.banner(
+        "Not while you are in the round",
+        "available once you are caught",
+        2.5,
+      );
+      return;
+    }
+    const seekers = this.seekerCars();
+    if (!seekers.length) {
+      this.hud.banner("No seeker to watch", "", 2);
+      return;
+    }
+    /* cycle: off -> first seeker -> ... -> last -> off */
+    const next = seekers.findIndex((sk) => sk.id === this.spectating) + 1;
+    if (next >= seekers.length) {
+      /* stopSpectating has to still see the old target so it can hand
+       * the camera back to our own car. */
+      this.stopSpectating();
+      return;
+    }
+    this.spectating = seekers[next].id;
+  },
+
+  stopSpectating() {
+    if (this.spectating === null) return;
+    this.spectating = null;
+    const s = this.sess;
+    if (this.bridge && this.bridge.renderer && s && s.localCar) {
+      try {
+        this.bridge.renderer.setCamera(s.localCar.cameraOrbit);
+      } catch (err) {
+        /* the session may already be going away */
+      }
+    }
+  },
+
+  updateSpectateCamera(dt) {
+    if (this.spectating === null) return;
+
+    /* Give way to the game's own free camera rather than fighting it
+     * for setCamera every frame. */
+    if (!this.canSpectate() || (this.bridge && this.bridge.freeCam && this.bridge.freeCam())) {
+      this.stopSpectating();
+      return;
+    }
+
+    const s = this.sess;
+    const record = s && s.remote ? s.remote.get(this.spectating) : null;
+    if (!record || !record.car) {
+      this.stopSpectating();
+      return;
+    }
+    try {
+      /* The game only drives the cameras of the local car, so the
+       * watched car's orbit camera has to be stepped by hand. */
+      record.car.updateCameras(clamp(dt, 0, 0.25));
+      this.bridge.renderer.setCamera(record.car.cameraOrbit);
+    } catch (err) {
+      this.stopSpectating();
+    }
   },
 
   /* Hosting with a mod gamemode selected waits for the lobby to fill
@@ -1050,10 +1339,13 @@ const HNS = {
     this.f_noSkid = false;
     this.hud.setWarning(0);
     document.documentElement.classList.remove("hns-hide-finish");
+    this.stopSpectating();
     if (!s) return;
     if (s.localCar) {
-      s.localCar.isControlsDisabled = false;
-      s.localCar.isPaused = false;
+      /* isControlsDisabled and isPaused are NOT reset here. The game
+       * re-derives both every frame from its own state (free camera
+       * flying, a modal open, ...), so writing false would fight it -
+       * see applyLocalEffects. */
       if (this.localOpacity !== 1) s.localCar.setOpacity(1);
     }
     this.localOpacity = 1;
@@ -1094,9 +1386,17 @@ const HNS = {
 
     /* --- our own car -------------------------------------------- */
     if (s.localCar) {
-      s.localCar.isControlsDisabled = blindfolded;
-      s.localCar.isPaused = blindfolded;
-      if (blindfolded) s.localCar.audioVolume = 0;
+      /* Only ever force these ON. The game sets both every frame,
+       * just before this hook runs, from state the mod knows nothing
+       * about - in particular it disables the controls while the free
+       * spectator camera is flying. Writing `false` here used to undo
+       * that, which is why flying the spectator camera also drove
+       * your car around. */
+      if (blindfolded) {
+        s.localCar.isControlsDisabled = true;
+        s.localCar.isPaused = true;
+        s.localCar.audioVolume = 0;
+      }
       /* Cars that never started are stacked on the spawn and the game
        * hides all but one of them, so everyone is started explicitly
        * once the round is on. */
@@ -1223,7 +1523,16 @@ const HNS = {
       };
     });
 
-    if (this.sess.isHost) view.hint = "[N] stop the round";
+    if (this.spectating !== null) {
+      const name =
+        (state.names && state.names[this.spectating]) ||
+        this.nameOf(this.spectating);
+      view.hint = "Watching " + name + "  -  [V] next, [V] again to exit";
+    } else if (this.canSpectate()) {
+      view.hint = "[V] watch the seeker";
+    } else if (this.sess.isHost) {
+      view.hint = "[N] stop the round";
+    }
 
     this.localSenses(view, state, seeker, out, playing, t);
     this.hud.render(view);
@@ -1451,7 +1760,17 @@ class HideAndSeekMod extends PolyMod {
 
     /* 6. The per-frame hook, placed after the game has finished moving
      *    every car this frame: positions are current, and anything the
-     *    mod writes is not overwritten again until the next frame. */
+     *    mod writes is not overwritten again until the next frame.
+     *
+     *    The bridge hands over the few session internals the mod needs
+     *    and cannot reach from module scope. It is built once and
+     *    cached on the session rather than rebuilt every frame:
+     *
+     *      track        - getPartsAt(x, y, z), to tell road from grass
+     *      tracks       - the track library, for rotating tracks
+     *      renderer     - setCamera(), for the seeker's-eye view
+     *      freeCam()    - is the game's own spectator camera flying?
+     *      resetToStart - exactly what the reset keybind does */
     pml.registerGlobalMixin({
       type: MixinType.INSERT,
       token: `((0, R.gn)(this, ta, "m", Cs).call(this),`,
@@ -1463,6 +1782,15 @@ class HideAndSeekMod extends PolyMod {
                     (0, R.gn)(this, Xa, "f"),
                     (0, R.gn)(this, as, "f"),
                     (0, R.gn)(this, Za, "f"),
+                    this.__hnsBridge ||
+                      (this.__hnsBridge = {
+                        track: (0, R.gn)(this, ra, "f"),
+                        tracks: (0, R.gn)(this, ma, "f"),
+                        renderer: (0, R.gn)(this, la, "f"),
+                        freeCam: () => (0, R.gn)(this, fs, "f").isEnabled,
+                        resetToStart: () =>
+                          (0, R.gn)(this, ta, "m", Ss).call(this),
+                      }),
                   ),`,
     });
 
@@ -1651,6 +1979,18 @@ class HideAndSeekMod extends PolyMod {
       SettingType.BOOL,
       true,
     );
+    pml.registerSetting(
+      "Reset to the start on grass",
+      "HnsGrassReset",
+      SettingType.BOOL,
+      true,
+    );
+    pml.registerSetting(
+      "Random community track each round",
+      "HnsRotateTracks",
+      SettingType.BOOL,
+      true,
+    );
     pml.registerSetting("Sound cues", "HnsSounds", SettingType.BOOL, true);
     pml.registerSetting(
       "Show the Hide & Seek HUD",
@@ -1670,6 +2010,18 @@ class HideAndSeekMod extends PolyMod {
         if (event.repeat || !HNS.sess) return;
         event.preventDefault();
         HNS.toggleRound();
+      },
+    );
+    pml.registerKeybind(
+      "Watch the seeker",
+      "HnsSpectateSeeker",
+      "keydown",
+      "KeyV",
+      null,
+      (event) => {
+        if (event.repeat || !HNS.sess || !HNS.state) return;
+        event.preventDefault();
+        HNS.toggleSpectate();
       },
     );
   };
