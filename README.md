@@ -1,16 +1,24 @@
-# Hide & Seek — a multiplayer gamemode for PolyTrack 0.6.2
+# Hide & Seek — a multiplayer gamemode for PolyTrack 0.6.3
 
-A PolyModLoader 0.6.2 mod. One player is the seeker and sits behind a black
-screen while everyone else scatters; when the timer runs out the seeker is
-released and has to drive into the hiders.
+A PolyModLoader mod. One player is the seeker and sits behind a black screen
+while everyone else scatters; when the timer runs out the seeker is released
+and has to drive into the hiders.
 
 It doubles as a tag gamemode — the same round machinery runs three rule sets.
+
+| Mod version | PolyTrack / PolyModLoader |
+| --- | --- |
+| **1.1.0** (current) | 0.6.3 |
+| 1.0.0 | 0.6.2 |
+
+PolyModLoader picks the right one from `manifest.json` automatically — there is
+a single import URL either way.
 
 ---
 
 ## Installing
 
-Open PolyModLoader (the launcher, or <https://w.polymodloader.com>), go to
+Open PolyModLoader 0.6.3 (the launcher, or <https://w.polymodloader.com>), go to
 **Mods → Add**, paste this URL, then press **Apply**:
 
 ```
@@ -116,41 +124,64 @@ smooth between broadcasts.
 
 ### Mixins
 
-Nine global mixins, all registered in `preInit` — see `1.0.0/main.mod.js`, each
+Nine global mixins, all registered in `preInit` — see `1.1.0/main.mod.js`, each
 one commented in place.
 
 | # | Anchor | Why |
 | --- | --- | --- |
 | 1 | `setNameTag` | Teach it that a null name means *remove the tag*. Stock always stores an object, so the sprite would be rebuilt reading `"null"`. |
 | 2 | Skid-mark `spawn` | Drop skid marks at the source while a round runs. |
-| 3 | `case Yt.ModCustomMessage` | Host-side receive, and consume the payload. |
-| 4 | `case $t.ModCustomMessage` | Client-side receive, and consume the payload. |
+| 3 | `case <c2h>.ModCustomMessage` | Host-side receive, and consume the payload. |
+| 4 | `case <h2c>.ModCustomMessage` | Client-side receive, and consume the payload. |
 | 5 | `kickPlayer` | Adds `hnsSend` / `hnsModdedIds` to the host connection class. |
-| 6 | the `vs` call in `update()` | The per-frame hook, placed after every car has moved. |
+| 6 | the opacity-pass call in `update()` | The per-frame hook, placed after every car has moved. |
 | 7 | `for (const t of o.mods)` | Host-side: note whether a joining peer runs the mod. |
 | 8 | `isOfferSet: !1,` | Store that flag on the peer record. |
 | 9 | game session `dispose` | Tear the round down when the track is left. |
 
 Global mixins are string surgery on PolyModLoader's own prettier-formatted copy
 of `main.bundle.js`, not on the minified bundle that ships in the game's asar —
-the tokens above are written against PML's copy and every one of them is unique
-in it.
+the tokens are written against PML's copy and every one of them is unique in it.
+
+### Porting between game versions
+
+The minified identifiers move every release, so each mod version is pinned to
+one game version. Going 0.6.2 → 0.6.3 needed these renames, and nothing else:
+
+| Meaning | 0.6.2 | 0.6.3 |
+| --- | --- | --- |
+| name-tag field on the car | `Ae` | `ve` |
+| client→host message enum | `Yt` | `en` |
+| host→client message enum | `$t` | `nn` |
+| host's connected-peer array | `Tn` | `_n` |
+| game session method set | `jr` | `ta` |
+| per-frame opacity pass | `vs` | `Cs` |
+| local car | `Fa` | `Xa` |
+| remote car map | `Ja` | `as` |
+| multiplayer session info | `Wa` | `Za` |
+
+Car geometry (`detectorBoxSize` 0.89 × 0.22 × 1.8, wheels at ±0.72 / ±1.53) and
+`maxFrames` are identical across the two, so the catch-distance tuning carries
+over unchanged.
 
 ### Testing
 
-The mod was developed against PML 0.6.2's actual bundle. Two offline harnesses
-live in the scratch directory used to build it:
+Each version is verified against the PolyModLoader release it targets. Two
+offline harnesses live in the scratch directory used to build it:
 
-- one replays PML's own mixin algorithm over `globalFunc`, checks each token is
-  found exactly once, and re-parses the patched 3.4 MB result;
+- one replays PML's own mixin algorithm over `globalFunc` for **both** mod
+  versions, asserts each token is found *exactly once* (ambiguous tokens fail,
+  not just missing ones), re-parses the ~3.5 MB patched result, and checks that
+  every minified identifier the injected code names actually exists in that
+  bundle — which is what catches a rename like `Ae` → `ve`;
 - one runs two module instances (a host and a client) against fake cars and a
-  fake peer link, covering role assignment, the phase machine, catches,
-  cooldowns, respawn immunity, height separation, all three modes, disconnects
-  and teardown.
+  fake peer link: 47 checks covering role assignment, the phase machine,
+  catches, cooldowns, respawn immunity, height separation, all three modes,
+  disconnects, HUD render and teardown.
 
-Both pass. What they cannot cover is anything that needs a real lobby: live
-WebRTC, the signalling server, and how the round feels at real ping. Play-test
-before relying on it.
+Both pass for 1.0.0/0.6.2 and 1.1.0/0.6.3. What they cannot cover is anything
+that needs a real lobby: live WebRTC, the signalling server, and how the round
+feels at real ping. Play-test before relying on it.
 
 ## Known limitations
 
