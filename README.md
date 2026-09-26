@@ -10,15 +10,17 @@ It doubles as a tag gamemode — the same round machinery runs three rule sets.
 
 ## Installing
 
-This is a normal PML mod repo: push this folder to a git forge, then paste the
-CDN URL into **Mods → Add** in game and press **Apply**.
+Open PolyModLoader (the launcher, or <https://w.polymodloader.com>), go to
+**Mods → Add**, paste this URL, then press **Apply**:
 
 ```
-https://cdn.polymodloader.com/gh/<owner>/<repo>/<branch>
+https://cdn.polymodloader.com/gh/hwadz/hideandseek/main
 ```
 
-(`gh` = GitHub, `cb` = Codeberg, `gl` = GitLab, `bb` = Bitbucket. Point the URL
-at whichever folder holds `manifest.json`.)
+That is PML's CDN form `…/[gh|cb|gl|bb]/<owner>/<repo>/<branch>[/path]` — `gh`
+= GitHub, `cb` = Codeberg, `gl` = GitLab, `bb` = Bitbucket — pointed at
+whichever folder holds `manifest.json`, which here is the repo root. If you
+fork or move the repo, change the owner/repo/branch to match.
 
 To iterate locally, serve this folder over HTTP, open <https://w.polymodloader.com>,
 add `http://localhost:<port>` as a mod, and turn **cache mods** off in the PML
