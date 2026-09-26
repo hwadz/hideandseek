@@ -32,7 +32,7 @@ import {
  * ------------------------------------------------------------------ */
 
 const MOD_ID = "hideandseek";
-const MOD_VERSION = "2.2.0";
+const MOD_VERSION = "2.2.1";
 
 /* Wire format: "HNS" + protocol version, then UTF-8 JSON. */
 const MAGIC = [0x48, 0x4e, 0x53, 0x01];
@@ -43,6 +43,7 @@ const VERTICAL_TAG_LIMIT = 1.6; /* world units, stops catches through floors */
 const RESPAWN_IMMUNITY = 1.5; /* s of safety after a respawn             */
 const NO_TAGBACK = 5.0; /* s, tag mode only                              */
 const OVER_SECONDS = 8; /* s the winner screen stays up                  */
+const CANCEL_SECONDS = 3; /* ...but a hand cancel clears sooner          */
 const RADAR_INTERVAL = 10; /* s between late-round seeker pings          */
 const RADAR_FROM = 1 / 3; /* radar wakes up with this fraction left      */
 const FEED_LENGTH = 6;
@@ -52,6 +53,7 @@ const FEED_LENGTH = 6;
 const PART_SIZE = 5;
 const GRASS_GRACE = 0.35; /* s off track before it counts               */
 const GRASS_COOLDOWN = 4; /* s before it can fire again                 */
+const FLIP_GRACE = 1.2; /* s upside down before it counts               */
 const OUT_OF_BOUNDS_MARGIN = 3; /* grid cells of slack past the track    */
 const FALL_LIMIT = 60; /* world units below the start = fallen off       */
 const TRACK_HISTORY = 8; /* recently played tracks not to repeat        */
@@ -438,6 +440,7 @@ const HNS = {
   /* Off-track reset. `area`/`floorY` are derived from the track once
    * per session; undefined means "not worked out yet". */
   grassFor: 0,
+  flippedFor: 0,
   grassCooldownUntil: 0,
   area: undefined,
   floorY: null,
@@ -674,7 +677,14 @@ const HNS = {
     /* Whichever way the host drives it by hand, stop the pending
      * auto-start from firing a second round underneath them. */
     this.pendingAutoStart = false;
-    if (this.state) this.abortRound();
+    /* The winner / cancelled screen is not a running round. Testing
+     * `this.state` alone meant every press during those seconds
+     * cancelled again and pushed the screen out by another eight,
+     * so the round could never be restarted with this key. */
+    const running =
+      this.state &&
+      (this.state.phase === "hiding" || this.state.phase === "seeking");
+    if (running) this.abortRound();
     else this.startRound();
   },
 
@@ -787,6 +797,11 @@ const HNS = {
   abortRound() {
     if (!this.state) return;
     this.finish("Round cancelled by the host");
+    /* The host said stop, so do not let auto-restart start another
+     * one the moment the notice clears. */
+    this.state.cancelled = true;
+    this.state.over = CANCEL_SECONDS;
+    this.broadcast();
   },
 
   finish(winText) {
@@ -862,7 +877,7 @@ const HNS = {
     } else if (state.phase === "over") {
       state.over -= dt;
       if (state.over <= 0) {
-        const again = this.bool("HnsAutoRestart", true);
+        const again = !state.cancelled && this.bool("HnsAutoRestart", true);
         this.clearRound();
         if (!again) return;
         /* A fresh track for the next round, if that is switched on.
@@ -1176,38 +1191,61 @@ const HNS = {
    * between two cells. Erring towards "on track" is deliberate - a
    * missed patch of grass is a nuisance, a reset in the middle of the
    * road is a ruined round. */
-  /* The play area, in grid cells, plus a margin. getBounds() returns
-   * Vector2s where .x is the grid x and .y is the grid z. */
+  /* The play area, in grid cells, plus a margin.
+   *
+   * This deliberately does NOT use the track renderer's own
+   * getBounds(): that field is initialised to {min:(0,0), max:(0,0)}
+   * when the renderer is built and never written again, so it always
+   * reports a zero-sized box at the origin. Believing it shrank the
+   * play area to a few cells around the world origin and teleported
+   * players who were driving perfectly normally.
+   *
+   * getTrackData() rebuilds a track-data object from the parts, and
+   * that one computes its bounds properly from forEachPart. It
+   * allocates, so it is worked out once per session.
+   *
+   * Bounds come back as Vector2s where .x is the grid x and .y is the
+   * grid z. Anything degenerate is treated as "unknown" and turns the
+   * bounds test off rather than resetting everybody. */
   playArea() {
-    const bridge = this.bridge;
     if (this.area !== undefined) return this.area;
     this.area = null;
+    this.floorY = null;
     try {
-      const b = bridge.track.getBounds();
-      if (
+      const data = this.bridge.track.getTrackData();
+      const b = data && data.getBounds ? data.getBounds() : null;
+      const ok =
         b &&
         b.min &&
         b.max &&
-        Number.isFinite(b.min.x) &&
-        Number.isFinite(b.min.y) &&
-        Number.isFinite(b.max.x) &&
-        Number.isFinite(b.max.y) &&
-        b.max.x >= b.min.x
-      ) {
+        [b.min.x, b.min.y, b.max.x, b.max.y].every(Number.isFinite) &&
+        /* a real track covers more than a single cell */
+        (b.max.x > b.min.x || b.max.y > b.min.y);
+      if (ok) {
         this.area = {
           minX: b.min.x - OUT_OF_BOUNDS_MARGIN,
           maxX: b.max.x + OUT_OF_BOUNDS_MARGIN,
           minZ: b.min.y - OUT_OF_BOUNDS_MARGIN,
           maxZ: b.max.y + OUT_OF_BOUNDS_MARGIN,
         };
+      } else {
+        console.warn("[hideandseek] track bounds unusable; edge check off");
       }
-      const start = bridge.track.getStartTransform();
+      const start = this.bridge.track.getStartTransform();
       this.floorY = start ? start.position.y - FALL_LIMIT : null;
     } catch (err) {
-      this.area = null;
-      this.floorY = null;
+      console.error("[hideandseek] could not read track bounds", err);
     }
     return this.area;
+  },
+
+  /* Rolled onto its roof. Rotating (0,1,0) by the car's quaternion
+   * gives an up vector whose y is 1 - 2(x^2 + z^2); negative means it
+   * is past horizontal. */
+  isFlipped(car) {
+    const q = car.getCarState().quaternion;
+    if (!q) return false;
+    return 1 - 2 * (q.x * q.x + q.z * q.z) < -0.1;
   },
 
   isOffTrack(car) {
@@ -1264,6 +1302,7 @@ const HNS = {
       !this.bool("HnsGrassReset", true)
     ) {
       this.grassFor = 0;
+      this.flippedFor = 0;
       return;
     }
     /* Not while blindfolded (the car is frozen on the start anyway),
@@ -1271,38 +1310,49 @@ const HNS = {
     const t = now();
     if (t < (this.grassCooldownUntil || 0)) {
       this.grassFor = 0;
+      this.flippedFor = 0;
       return;
     }
     if (state.phase === "hiding" && this.isSeeker()) {
       this.grassFor = 0;
+      this.flippedFor = 0;
       return;
     }
     /* A frozen hider cannot drive off anything, and dumping them on
      * the start line unable to move would just be cruel. */
     if (this.isFrozen()) {
       this.grassFor = 0;
+      this.flippedFor = 0;
       return;
     }
 
-    let onGrass = false;
+    let offTrack = false;
+    let flipped = false;
     try {
-      onGrass = this.isOffTrack(s.localCar);
+      offTrack = this.isOffTrack(s.localCar);
+      flipped = this.isFlipped(s.localCar);
     } catch (err) {
       return; /* never let a detection slip break the frame */
     }
 
-    if (!onGrass) {
-      this.grassFor = 0;
-      return;
-    }
+    /* Two clocks: a quick one for leaving the track, a slower one for
+     * ending up on your roof, so a barrel roll mid-jump is not a
+     * reset on its own. */
+    this.grassFor = offTrack ? (this.grassFor || 0) + clamp(dt, 0, 0.25) : 0;
+    this.flippedFor = flipped ? (this.flippedFor || 0) + clamp(dt, 0, 0.25) : 0;
 
-    /* Require a moment of it, so clipping a corner is not a reset. */
-    this.grassFor = (this.grassFor || 0) + clamp(dt, 0, 0.25);
-    if (this.grassFor < GRASS_GRACE) return;
+    const why =
+      this.grassFor >= GRASS_GRACE
+        ? "back to the start"
+        : this.flippedFor >= FLIP_GRACE
+          ? "you landed on your roof"
+          : null;
+    if (!why) return;
 
     this.grassFor = 0;
+    this.flippedFor = 0;
     this.grassCooldownUntil = t + GRASS_COOLDOWN;
-    this.hud.banner("OFF TRACK", "back to the start", 2);
+    this.hud.banner("OFF TRACK", why, 2);
     this.tuneBlip();
     Blip.caught();
     try {
@@ -1547,8 +1597,10 @@ const HNS = {
         s.localCar.isPaused = true;
         s.localCar.audioVolume = 0;
       } else if (this.isFrozen()) {
+        /* Controls only - the car is NOT paused, so it still settles,
+         * falls and rolls. Frozen means the pedals do nothing, not
+         * that the world stops for you. */
         s.localCar.isControlsDisabled = true;
-        s.localCar.isPaused = true;
       }
       /* Cars that never started are stacked on the spawn and the game
        * hides all but one of them, so everyone is started explicitly
@@ -1698,7 +1750,10 @@ const HNS = {
     } else if (this.canSpectate()) {
       view.hint = "[V] watch the seeker";
     } else if (this.sess.isHost) {
-      view.hint = "[N] stop the round    [B] new seeker";
+      view.hint =
+        state.phase === "over"
+          ? "[N] start a round"
+          : "[N] stop the round    [B] new seeker";
     }
 
     this.localSenses(view, state, seeker, out, playing, t);

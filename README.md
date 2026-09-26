@@ -62,8 +62,11 @@ stays a spectator — they are never kicked and the lobby still works.
    while *Start another round automatically* is on.
 3. The host can also press **N** at any time to start or stop a round by hand
    — including during a plain Casual or Competitive session.
-4. Once you are caught, press **V** to ride along with the seeker's camera —
-   press it again to cycle seekers, and once more to go back to your own car.
+4. Once you are caught, press **V** to ride along with another player's
+   camera — seekers first, then the hiders — and again past the last one to
+   go back to your own car.
+5. The host can press **B**, or the **↻ New seeker** button on the HUD, to
+   redraw the seeker without changing track.
 4. Round rules come from the **host's** Settings → Hide & Seek. Everyone
    else's copies of those settings are ignored; only their local preferences
    (HUD, sounds, warnings) apply.
@@ -92,8 +95,17 @@ after a couple of rounds:
   spawn point (the game hides all but one car that has not started yet).
 - **Off-track resets.** Touching the grass for more than a third of a second
   puts you back on the start line, so hiders have to use the track instead of
-  parking in the terrain. There is a cooldown so a bad landing cannot loop it,
-  and a brief clip of a corner does not count.
+  parking in the terrain. Driving out past the edge of the track — into the
+  mountains — or falling out of the world counts too, and neither of those
+  needs a wheel on anything. Ending up on your roof counts as well, after a
+  longer grace so a barrel roll mid-jump is not a reset by itself. There is a
+  cooldown so a bad landing cannot loop it, and a brief clip of a corner does
+  not count.
+- **Hiders freeze** once they have had their settling time (15 s by default)
+  after the seeker is released, so you commit to a spot instead of driving
+  circles around a seeker who can never catch you. The car is not paused — it
+  still settles, falls and rolls; the pedals just stop doing anything. Seekers
+  and players already out keep moving.
 - **Catch cooldown** (default 3 s) after every catch.
 - **Respawn immunity** (1.5 s) so the start line cannot be camped.
 - **No instant tag-backs** in tag mode (5 s).
@@ -124,14 +136,14 @@ after a couple of rounds:
 
 Under **Settings → Hide & Seek**. Host-side (round rules): Gamemode, Hiding
 time, Round length, Seekers, Catch range, Catch cooldown, Warning range, Start
-another round automatically, Reset to the start on grass, Random community
-track each round. Client-side (local preference): Hide name tags,
+another round automatically, Freeze hiders after, Reset to the start on grass,
+Random community track each round. Client-side (local preference): Hide name tags,
 Hide skid marks, Warn hiders when a seeker is close, Seeker radar late in the
 round, Sound cues, Show the Hide & Seek HUD.
 
-Keybinds under **Controls → Hide & Seek**: Start / stop round (**N**) and
-Watch the seeker (**V**). `H` was not available — PolyTrack already uses it
-for Toggle UI.
+Keybinds under **Controls → Hide & Seek**: Start / stop round (**N**), New
+seeker, same track (**B**) and Spectate players (**V**). `H` was not available
+— PolyTrack already uses it for Toggle UI.
 
 ---
 
@@ -175,7 +187,7 @@ keeps a vanilla player's join working — they simply spectate.
 
 ### Mixins
 
-Ten global mixins, all registered in `preInit` — see `2.2.0/main.mod.js`, each
+Ten global mixins, all registered in `preInit` — see `2.2.1/main.mod.js`, each
 one commented in place.
 
 | # | Anchor | Why |
@@ -249,6 +261,19 @@ holds a track part. The cell below each contact point is checked too, because
 a contact sits on a part's top face and that lands on a cell boundary. The
 check errs towards "on track" on purpose — a missed patch of grass is a
 nuisance, a reset in the middle of the road ruins a round.
+
+Out past the track's own bounding box (plus three cells of slack), or far
+below the start, is off-track on its own — no wheel contact needed. That is
+what catches the mountains, which are scenery rather than collision, and
+anything launched into the void.
+
+Those bounds come from `getTrackData().getBounds()`, **not** the track
+renderer's own `getBounds()`. The renderer's bounds field is set to
+`{min:(0,0), max:(0,0)}` when it is built and never written again, so it always
+reports a zero-sized box at the world origin. Trusting it shrank the play area
+to a few cells around the origin and teleported players who were driving
+perfectly normally. Degenerate bounds now switch the edge check off instead of
+resetting everybody.
 
 A consequence worth knowing: this confines hiders to the track. On a map where
 the terrain itself is meant to be driven, turn the setting off.
